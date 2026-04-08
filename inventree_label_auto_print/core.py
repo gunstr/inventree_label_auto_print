@@ -2,6 +2,8 @@
 
 from venv import logger
 
+from django.utils.translation import gettext_lazy as _
+
 from plugin import InvenTreePlugin
 
 from plugin.mixins import EventMixin, SettingsMixin
@@ -38,22 +40,44 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
     # MIN_VERSION = '0.18.0'
     # MAX_VERSION = '2.0.0'
 
+    @staticmethod
+    def get_machine_choices() -> list[tuple[str, str]]:
+        """
+        Dynamically fetch registered machine instances.
+        We import inside the function to avoid circular import issues 
+        during InvenTree startup.
+        """
+        try:
+            from machine.models import MachineConfig
+
+            # Fetch all configured machines
+            machines = MachineConfig.objects.all()
+
+            choices = [(str(m.pk), str(m.name)) for m in MachineConfig.objects.all()]
+
+            # If empty, return a list of string tuples
+            if not choices:
+                return [("", "No printers found")]
+
+            return choices
+
+        except ImportError:
+            # Fallback if the machine app is not enabled or version differs
+            return [("", "Error loading machines")]
+
     # Plugin settings (from SettingsMixin)
     # Ref: https://docs.inventree.org/en/latest/plugins/mixins/settings/
     SETTINGS = {
-        # Define your plugin settings here...
-        "CUSTOM_VALUE": {
-            "name": "Custom Value",
-            "description": "A custom value",
-            "validator": int,
-            "default": 42,
-        }
+        'SELECTED_PRINTER': {
+            'name': str(_('Label Printer')),
+            'description': str(_('Select a machine to use as a label printer')),
+            'choices': get_machine_choices,
+        },
     }
-
-    QL700_UUID = "8a74d153-55f4-422f-8e86-a2d90cf78466"
 
     # Respond to InvenTree events (from EventMixin)
     # Ref: https://docs.inventree.org/en/latest/plugins/mixins/event/
+
     def wants_process_event(self, event: str) -> bool:
         """Return True if the plugin wants to process the given event."""
         # Example: only process the 'create part' event
@@ -64,11 +88,18 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
         if event == 'purchaseorderitem.received':
             stock_item_ids: list[str] | None = kwargs.get('item_ids')
 
+            # Retrieve the machine PK from the settings
+            machine_pk = self.get_setting('SELECTED_PRINTER')
+
+            if not machine_pk:
+                # Handle the case where no printer is selected yet
+                return
+
             try:
 
                 machine: LabelPrinterMachine | None = None
                 driver: LabelPrinterBaseDriver | None = None
-                machine, driver = get_machine_and_driver(self.QL700_UUID)
+                machine, driver = get_machine_and_driver(machine_pk)
 
                 if machine is None or driver is None:
                     logger.error("No valid machine or driver found for label printing.")
