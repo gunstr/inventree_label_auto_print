@@ -41,6 +41,21 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
     # MAX_VERSION = '2.0.0'
 
     @staticmethod
+    def get_label_choices() -> list[tuple[str, str]]:
+        try:
+            # Import the base template model
+            from report.models import LabelTemplate
+            
+            # Filter for templates where the 'model_type' is 'stockitem'
+            labels = LabelTemplate.objects.filter(model_type='stockitem')
+            
+            choices = [(str(l.pk), str(l.name)) for l in labels]
+            return choices if choices else [("", "No Stock Item labels found")]
+            
+        except Exception as e:
+            return [("", f"Error: {str(e)}")]
+        
+    @staticmethod
     def get_machine_choices() -> list[tuple[str, str]]:
         """
         Dynamically fetch registered machine instances.
@@ -68,6 +83,11 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
     # Plugin settings (from SettingsMixin)
     # Ref: https://docs.inventree.org/en/latest/plugins/mixins/settings/
     SETTINGS = {
+        'SELECTED_LABEL': {
+            'name': str(_('Label Template')),
+            'description': str(_('Select a Stock Item label template')),
+            'choices': get_label_choices,
+        },
         'SELECTED_PRINTER': {
             'name': str(_('Label Printer')),
             'description': str(_('Select a machine to use as a label printer')),
@@ -88,11 +108,17 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
         if event == 'purchaseorderitem.received':
             stock_item_ids: list[str] | None = kwargs.get('item_ids')
 
-            # Retrieve the machine PK from the settings
+            # Retrieve the IDs from settings
             machine_pk = self.get_setting('SELECTED_PRINTER')
+            label_pk = self.get_setting('SELECTED_LABEL')
 
             if not machine_pk:
                 # Handle the case where no printer is selected yet
+                logger.warning("No label printer selected.")
+                return
+            if not label_pk:
+                # Handle the case where no label template is selected yet
+                logger.warning("No label template selected.")
                 return
 
             try:
@@ -105,19 +131,19 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
                     logger.error("No valid machine or driver found for label printing.")
                     return
 
-                # 1. Get the newly created stock item
-                item = [StockItem.objects.get(pk=stock_item_ids[0])] if stock_item_ids else []
+                # Iterate over the stock item IDs and print labels for each
+                items = [StockItem.objects.get(pk=stock_item_id) for stock_item_id in stock_item_ids] if stock_item_ids else []
 
                 # Get the label template you want to use
-                label = LabelTemplate.objects.get(pk=7)  # Get your label template
+                label = LabelTemplate.objects.get(pk=label_pk)  # Get the label template
 
-                if label and item:
+                if label and items:
                     offload_task(
                         call_machine_function,
                         machine.pk,
                         'print_labels',
                         label,
-                        item,
+                        items,
                         printing_options={'copies': 1},
                         group='plugin',
                     )
