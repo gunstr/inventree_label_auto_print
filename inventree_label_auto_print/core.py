@@ -1,6 +1,6 @@
 """Triggers a print of a stock item label when a PO item is received"""
 
-from venv import logger
+import structlog
 
 from django.utils.translation import gettext_lazy as _
 
@@ -10,7 +10,6 @@ from plugin.mixins import EventMixin, SettingsMixin
 
 from stock.models import StockItem
 from report.models import LabelTemplate
-import report.helpers
 
 from plugin.builtin.labels.inventree_machine import get_machine_and_driver
 from machine.machine_types import LabelPrinterBaseDriver, LabelPrinterMachine
@@ -19,6 +18,8 @@ from plugin.machine import call_machine_function, registry
 from InvenTree.tasks import offload_task
 
 from . import PLUGIN_VERSION
+
+logger = structlog.get_logger('inventree_label_auto_print')
 
 
 class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
@@ -37,7 +38,7 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
     LICENSE = "MIT"
 
     # Optionally specify supported InvenTree versions
-    # MIN_VERSION = '0.18.0'
+    MIN_VERSION = "1.0.0"
     # MAX_VERSION = '2.0.0'
 
     @staticmethod
@@ -45,16 +46,16 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
         try:
             # Import the base template model
             from report.models import LabelTemplate
-            
+
             # Filter for templates where the 'model_type' is 'stockitem'
             labels = LabelTemplate.objects.filter(model_type='stockitem')
-            
+
             choices = [(str(l.pk), str(l.name)) for l in labels]
             return choices if choices else [("", "No Stock Item labels found")]
-            
+
         except Exception as e:
             return [("", f"Error: {str(e)}")]
-        
+
     @staticmethod
     def get_machine_choices() -> list[tuple[str, str]]:
         """
@@ -64,9 +65,6 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
         """
         try:
             from machine.models import MachineConfig
-
-            # Fetch all configured machines
-            machines = MachineConfig.objects.all()
 
             choices = [(str(m.pk), str(m.name)) for m in MachineConfig.objects.all()]
 
@@ -100,15 +98,16 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
 
     def wants_process_event(self, event: str) -> bool:
         """Return True if the plugin wants to process the given event."""
-        # Example: only process the 'create part' event
+        # Process only the 'purchase order item received' event
         return event == "purchaseorderitem.received"
 
     def process_event(self, event: str, *args, **kwargs) -> None:
         """Process the provided event."""
         if event == 'purchaseorderitem.received':
+            # Extract the stock item IDs from the event kwargs
             stock_item_ids: list[str] | None = kwargs.get('item_ids')
 
-            # Retrieve the IDs from settings
+            # Retrieve the machine and label IDs from settings
             machine_pk = self.get_setting('SELECTED_PRINTER')
             label_pk = self.get_setting('SELECTED_LABEL')
 
@@ -131,15 +130,17 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
                     logger.error("No valid machine or driver found for label printing.")
                     return
 
-                # Iterate over the stock item IDs and print labels for each
+                # Iterate over the stock item IDs and add to a list of items to print
                 items = [StockItem.objects.get(pk=stock_item_id) for stock_item_id in stock_item_ids] if stock_item_ids else []
 
-                # Get the label template you want to use
-                label = LabelTemplate.objects.get(pk=label_pk)  # Get the label template
+                # Get the label template to use
+                label = LabelTemplate.objects.get(pk=label_pk)
 
+                # Call the machine function to print the labels
+                # No need to offload this to a background task, as the machine driver will handle that internally if needed
+                # and the process_event method is anyway already called in a background task context by InvenTree
                 if label and items:
-                    offload_task(
-                        call_machine_function,
+                    call_machine_function(
                         machine.pk,
                         'print_labels',
                         label,
@@ -150,4 +151,4 @@ class InvenTreeLabelAutoPrint(EventMixin, SettingsMixin, InvenTreePlugin):
 
             except (StockItem.DoesNotExist, Exception) as e:
                 # Log the error if needed
-                print(f"AutoPrint Error: {e}")
+                logger.error(f"Error processing event '{event}': {e}")
